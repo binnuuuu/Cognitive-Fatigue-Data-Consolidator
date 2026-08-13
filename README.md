@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# Cognitive-Fatigue-Data-Consolidator
-=======
 # Cognitive Fatigue Data Consolidator
 
 A small Python tool for consolidating research data into one Excel workbook per participant.
@@ -77,4 +74,3 @@ The tool creates one Excel file per participant in the output directory, with sh
 This is best described as a research data consolidation tool or Python data-processing utility.
 
 It is not a web app or a manual data-entry tool.
->>>>>>> a71ef60 (Initial commit)
