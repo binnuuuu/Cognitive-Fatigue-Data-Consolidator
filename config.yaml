@@ -1,0 +1,33 @@
+input_directory: sample_data
+output_directory: output
+log_directory: logs
+
+# File-name aliases used to identify each stream.
+stream_aliases:
+  EyeTracking:
+    - eye
+    - eye_tracking
+    - eyetracking
+    - pupil
+  HeartRate:
+    - heart
+    - heart_rate
+    - heartrate
+    - hr
+  EEG:
+    - eeg
+  Behavior:
+    - behavior
+    - behavioural
+    - behavioral
+    - reaction
+  Subjective:
+    - subjective
+    - questionnaire
+    - survey
+
+# Input files supported: .csv, .xlsx, .xls
+supported_extensions:
+  - .csv
+  - .xlsx
+  - .xls
