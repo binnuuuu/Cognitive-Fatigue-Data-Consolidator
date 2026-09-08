@@ -1,33 +1,23 @@
-input_directory: sample_data
-output_directory: output
+# Supply the real path with --input, or place an extracted package here.
+input_path: incoming_data
+output_file: output/consolidated_study_data.xlsx
 log_directory: logs
+worksheet_name: Consolidated_Data
 
-# File-name aliases used to identify each stream.
-stream_aliases:
-  EyeTracking:
-    - eye
-    - eye_tracking
-    - eyetracking
-    - pupil
-  HeartRate:
-    - heart
-    - heart_rate
-    - heartrate
-    - hr
-  EEG:
-    - eeg
-  Behavior:
-    - behavior
-    - behavioural
-    - behavioral
-    - reaction
-  Subjective:
-    - subjective
-    - questionnaire
-    - survey
+# Qualtrics administrative columns A-Q are removed automatically by keeping
+# columns from PID onward. These procedural fields are also removed.
+post_survey_drop_columns:
+  - Spacer
+  - Spacer_2
 
-# Input files supported: .csv, .xlsx, .xls
-supported_extensions:
-  - .csv
-  - .xlsx
-  - .xls
+# Keep the original numeric codes and add readable Label columns.
+condition_labels:
+  Fatigue Condition:
+    "0": Non-fatigue
+    "1": Fatigue
+  AI_Decision_Support:
+    "1": LowSupport
+    "2": HighSupport
+  AI_Action_Support:
+    "1": Manual
+    "2": AIAssisted

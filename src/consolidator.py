@@ -1,164 +1,236 @@
 import argparse
 import logging
+import re
 from pathlib import Path
-from datetime import datetime
 
 import pandas as pd
 
 from .config import load_config
-from .discovery import (
-    discover_participants, discover_days, discover_files, identify_stream
+from .discovery import discover_study_files, normalize, open_input_tree
+from .excel_writer import write_consolidated_workbook
+from .readers import NASA_COLUMNS, read_nasa_tlx, read_post_survey, read_simulator_json
+from .validator import (
+    ConsolidationError,
+    validate_master_sessions,
+    validate_unique_auxiliary,
 )
-from .readers import read_data_file
-from .validator import quality_metrics
-from .excel_writer import write_workbook
 
-EXPECTED_STREAMS = ["EyeTracking", "HeartRate", "EEG", "Behavior", "Subjective"]
 
-def setup_logging(log_dir: Path):
+def setup_logging(log_dir: Path) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "run.log"
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
         handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler()
+            logging.FileHandler(log_dir / "run.log", encoding="utf-8"),
+            logging.StreamHandler(),
         ],
         force=True,
     )
 
-def consolidate_participant(participant_dir: Path, output_dir: Path, config: dict):
-    participant = participant_dir.name
-    aliases = config.get("stream_aliases", {})
-    extensions = config.get("supported_extensions", [".csv", ".xlsx", ".xls"])
 
-    stream_frames = {stream: [] for stream in EXPECTED_STREAMS}
-    overview = []
-    summary = []
+def _participant_sort_key(value: str):
+    match = re.search(r"(\d+)", str(value))
+    return (int(match.group(1)) if match else float("inf"), str(value))
+
+
+def _normalized_equal(left, right) -> bool:
+    if left is None or right is None or pd.isna(left) or pd.isna(right):
+        return False
+    return normalize(str(left)) == normalize(str(right))
+
+
+def _resolve_record_day(
+    record: dict,
+    master: pd.DataFrame,
+    source_name: str,
+    warnings: list[str],
+):
+    participant = str(record.get("PID") or "").strip().upper()
+    candidates = master[master["PID"] == participant]
+    if candidates.empty:
+        warnings.append(f"Ignored {source_name} record for unknown participant {participant}.")
+        return None
+
+    requested_day = record.get("Day")
+    if requested_day is not None and not pd.isna(requested_day):
+        exact = candidates[candidates["Day"].astype(str) == str(requested_day)]
+        if len(exact) == 1:
+            return exact.iloc[0]["Day"]
+        warnings.append(
+            f"Could not match {source_name} for {participant}: Day {requested_day} is not unique."
+        )
+        return None
+
+    if len(candidates) == 1:
+        return candidates.iloc[0]["Day"]
+
+    # Simulator support modes can disambiguate sessions when filenames omit Day.
+    if source_name == "simulator":
+        matching = candidates[
+            candidates.apply(
+                lambda row: _normalized_equal(
+                    row.get("AI_Decision_Support Label"),
+                    record.get("SIM_AI_Decision_Mode"),
+                )
+                and _normalized_equal(
+                    row.get("AI_Action_Support Label"),
+                    record.get("SIM_AI_Action_Mode"),
+                ),
+                axis=1,
+            )
+        ]
+        if len(matching) == 1:
+            return matching.iloc[0]["Day"]
+
+    warnings.append(
+        f"Could not match {source_name} for {participant}: multiple sessions exist and the file has no Day."
+    )
+    return None
+
+
+def _resolve_records(
+    records: list[dict],
+    master: pd.DataFrame,
+    source_name: str,
+    warnings: list[str],
+) -> list[dict]:
+    resolved = []
+    for record in records:
+        day = _resolve_record_day(record, master, source_name, warnings)
+        if day is None:
+            continue
+        matched = record.copy()
+        matched["PID"] = str(matched["PID"]).strip().upper()
+        matched["Day"] = day
+        resolved.append(matched)
+    validate_unique_auxiliary(resolved, source_name)
+    return resolved
+
+
+def _ensure_columns(frame: pd.DataFrame, columns: list[str]) -> None:
+    for column in columns:
+        if column not in frame:
+            frame[column] = pd.NA
+
+
+def _merge_records(master: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return master
+    auxiliary = pd.DataFrame(records)
+    return master.merge(auxiliary, how="left", on=["PID", "Day"], validate="one_to_one")
+
+
+def _reorder_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    first = [
+        "PID",
+        "Day",
+        "Fatigue Condition",
+        "Fatigue Condition Label",
+        "AI_Decision_Support",
+        "AI_Decision_Support Label",
+        "AI_Action_Support",
+        "AI_Action_Support Label",
+    ]
+    first = [column for column in first if column in frame]
+    final = [
+        "NASA_Available",
+        "Simulator_Available",
+        "Data_Status_Notes",
+        "Post_Source_File",
+        "NASA_Source_File",
+        "SIM_Source_File",
+    ]
+    final = [column for column in final if column in frame]
+    middle = [column for column in frame.columns if column not in first and column not in final]
+    return frame[first + middle + final]
+
+
+def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFrame, list[str]]:
     warnings = []
+    with open_input_tree(input_path) as root:
+        files = discover_study_files(root)
+        master = read_post_survey(files["post_survey"], config)
+        validate_master_sessions(master)
 
-    days = discover_days(participant_dir)
-
-    if not days:
-        warnings.append("No day folders found.")
-
-    for day_dir in days:
-        day = day_dir.name
-        files = discover_files(day_dir, extensions)
-
-        found_streams = set()
-
-        for file_path in files:
-            stream = identify_stream(file_path.name, aliases)
-
-            if stream is None:
-                warnings.append(f"Unrecognized file: {day}/{file_path.name}")
-                continue
-
+        nasa_records = []
+        for path in files["nasa_tlx"]:
             try:
-                df = read_data_file(file_path)
-                df = df.copy()
-                df.insert(0, "Day", day)
-                df.insert(0, "Participant", participant)
-                df.insert(2, "Source File", file_path.name)
-
-                stream_frames.setdefault(stream, []).append(df)
-                found_streams.add(stream)
-
-                metrics = quality_metrics(df)
-                metrics.update({
-                    "Participant": participant,
-                    "Day": day,
-                    "Stream": stream,
-                    "Source File": file_path.name,
-                })
-                summary.append(metrics)
-
-                logging.info("%s | %s | %s | %d rows",
-                             participant, day, stream, len(df))
-
+                nasa_records.append(read_nasa_tlx(path))
             except Exception as exc:
-                message = f"Failed to read {day}/{file_path.name}: {exc}"
-                warnings.append(message)
-                logging.exception(message)
+                warnings.append(f"Failed to read NASA-TLX file {path.name}: {exc}")
 
-        missing = set(EXPECTED_STREAMS) - found_streams
-        for stream in sorted(missing):
-            warnings.append(f"Missing {stream} file in {day}")
+        simulator_records = []
+        for path in files["simulator"]:
+            try:
+                simulator_records.extend(read_simulator_json(path))
+            except Exception as exc:
+                warnings.append(f"Failed to read simulator file {path.name}: {exc}")
 
-    combined = {}
-    for stream, frames in stream_frames.items():
-        if frames:
-            combined[stream] = pd.concat(frames, ignore_index=True, sort=False)
-        else:
-            combined[stream] = pd.DataFrame({
-                "Participant": [],
-                "Day": [],
-                "Source File": [],
-            })
+        nasa_records = _resolve_records(nasa_records, master, "NASA-TLX", warnings)
+        simulator_records = _resolve_records(simulator_records, master, "simulator", warnings)
 
-    total_files = sum(len(frames) for frames in stream_frames.values())
-    overview.extend([
-        {"Property": "Participant", "Value": participant},
-        {"Property": "Generated", "Value": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
-        {"Property": "Days Detected", "Value": len(days)},
-        {"Property": "Files Imported", "Value": total_files},
-        {"Property": "Warnings", "Value": len(warnings)},
-        {"Property": "Status", "Value": "Completed with warnings" if warnings else "Completed"},
-    ])
+        output = _merge_records(master, nasa_records)
+        output = _merge_records(output, simulator_records)
 
-    if warnings:
-        overview.append({"Property": "Warnings / Notes", "Value": " | ".join(warnings)})
+    _ensure_columns(output, ["NASA_Source_File", *NASA_COLUMNS.values(), "SIM_Source_File"])
+    output["NASA_Available"] = output["NASA_Source_File"].notna().map({True: "Yes", False: "No"})
+    output["Simulator_Available"] = output["SIM_Source_File"].notna().map({True: "Yes", False: "No"})
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{participant}.xlsx"
-    write_workbook(output_path, participant, combined, overview, summary)
+    notes = []
+    for row in output.itertuples(index=False):
+        missing = []
+        if getattr(row, "NASA_Available") == "No":
+            missing.append("NASA-TLX unavailable")
+        if getattr(row, "Simulator_Available") == "No":
+            missing.append("Simulator unavailable")
+        notes.append("; ".join(missing))
+    output["Data_Status_Notes"] = notes
 
-    if warnings:
-        logging.warning("%s completed with %d warning(s)", participant, len(warnings))
-    else:
-        logging.info("%s completed successfully", participant)
+    for row in output.itertuples(index=False):
+        if row.NASA_Available == "No":
+            warnings.append(f"NASA-TLX unavailable for {row.PID}/Day{row.Day}.")
+        if row.Simulator_Available == "No":
+            warnings.append(f"Simulator unavailable for {row.PID}/Day{row.Day}.")
 
-    return output_path, warnings
+    output["_participant_sort"] = output["PID"].map(_participant_sort_key)
+    output = output.sort_values(["_participant_sort", "Day"]).drop(columns="_participant_sort")
+    return _reorder_columns(output.reset_index(drop=True)), warnings
 
-def main():
+
+def consolidate(input_path: Path, output_path: Path, config: dict):
+    data, warnings = build_consolidated_data(input_path, config)
+    written = write_consolidated_workbook(
+        output_path,
+        data,
+        config.get("worksheet_name", "Consolidated_Data"),
+    )
+    return written, data, warnings
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Consolidate multi-stream participant data into Excel workbooks."
+        description="Consolidate Post Survey, NASA-TLX, and simulator data into one workbook."
     )
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--input", default=None)
-    parser.add_argument("--output", default=None)
+    parser.add_argument("--input", dest="input_path", default=None)
+    parser.add_argument("--output", dest="output_path", default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
+    input_path = Path(args.input_path or config["input_path"])
+    output_path = Path(args.output_path or config["output_file"])
+    setup_logging(Path(config.get("log_directory", "logs")))
 
-    input_dir = Path(args.input or config["input_directory"])
-    output_dir = Path(args.output or config["output_directory"])
-    log_dir = Path(config.get("log_directory", "logs"))
+    try:
+        written, data, warnings = consolidate(input_path, output_path, config)
+    except (ConsolidationError, FileNotFoundError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
 
-    setup_logging(log_dir)
+    for warning in warnings:
+        logging.warning(warning)
+    logging.info("Created %s with %d participant-session row(s).", written, len(data))
 
-    if not input_dir.exists():
-        raise SystemExit(f"Input directory does not exist: {input_dir}")
-
-    participants = discover_participants(input_dir)
-    if not participants:
-        raise SystemExit(f"No participant folders found in: {input_dir}")
-
-    logging.info("Found %d participant(s).", len(participants))
-
-    failures = 0
-    for participant_dir in participants:
-        try:
-            consolidate_participant(participant_dir, output_dir, config)
-        except Exception:
-            failures += 1
-            logging.exception("Participant failed: %s", participant_dir.name)
-
-    logging.info("Batch complete. Participants: %d | Failures: %d",
-                 len(participants), failures)
 
 if __name__ == "__main__":
     main()

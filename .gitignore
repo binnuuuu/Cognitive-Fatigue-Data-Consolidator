@@ -4,3 +4,8 @@ __pycache__/
 *.py[cod]
 logs/
 output/
+incoming_data/
+*.zip
+
+# Private human-participant source files used only for local reference.
+private_reference/

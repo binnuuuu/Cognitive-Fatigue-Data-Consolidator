@@ -2,11 +2,25 @@ from pathlib import Path
 import yaml
 
 DEFAULT_CONFIG = {
-    "input_directory": "sample_data",
-    "output_directory": "output",
+    "input_path": "incoming_data",
+    "output_file": "output/consolidated_study_data.xlsx",
     "log_directory": "logs",
-    "stream_aliases": {},
-    "supported_extensions": [".csv", ".xlsx", ".xls"],
+    "worksheet_name": "Consolidated_Data",
+    "post_survey_drop_columns": ["Spacer", "Spacer_2"],
+    "condition_labels": {
+        "Fatigue Condition": {
+            "0": "Non-fatigue",
+            "1": "Fatigue",
+        },
+        "AI_Decision_Support": {
+            "1": "LowSupport",
+            "2": "HighSupport",
+        },
+        "AI_Action_Support": {
+            "1": "Manual",
+            "2": "AIAssisted",
+        },
+    },
 }
 
 def load_config(path: str = "config.yaml") -> dict:
