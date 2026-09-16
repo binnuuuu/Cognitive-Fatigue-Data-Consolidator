@@ -5,7 +5,11 @@ from statistics import mean
 
 import pandas as pd
 
-from .discovery import day_from_name, participant_from_name
+from .discovery import (
+    day_from_name,
+    fatigue_condition_from_name,
+    participant_from_name,
+)
 
 
 def _number(value):
@@ -95,6 +99,7 @@ def read_nasa_tlx(path: Path) -> dict:
     record = {
         "PID": participant,
         "Day": day_from_name(path),
+        "_Match_Fatigue_Condition": fatigue_condition_from_name(path),
         "NASA_Source_File": path.name,
     }
     with path.open("r", encoding="utf-8-sig", newline="") as handle:

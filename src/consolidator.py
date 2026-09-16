@@ -56,6 +56,16 @@ def _resolve_record_day(
     if requested_day is not None and not pd.isna(requested_day):
         exact = candidates[candidates["Day"].astype(str) == str(requested_day)]
         if len(exact) == 1:
+            requested_condition = record.get("_Match_Fatigue_Condition")
+            if (
+                requested_condition is not None
+                and str(exact.iloc[0].get("Fatigue Condition")) != str(requested_condition)
+            ):
+                warnings.append(
+                    f"Could not match {source_name} for {participant}: "
+                    f"Day {requested_day} conflicts with the filename fatigue condition."
+                )
+                return None
             return exact.iloc[0]["Day"]
         warnings.append(
             f"Could not match {source_name} for {participant}: Day {requested_day} is not unique."
@@ -64,6 +74,14 @@ def _resolve_record_day(
 
     if len(candidates) == 1:
         return candidates.iloc[0]["Day"]
+
+    requested_condition = record.get("_Match_Fatigue_Condition")
+    if requested_condition is not None and "Fatigue Condition" in candidates:
+        matching = candidates[
+            candidates["Fatigue Condition"].astype(str) == str(requested_condition)
+        ]
+        if len(matching) == 1:
+            return matching.iloc[0]["Day"]
 
     # Simulator support modes can disambiguate sessions when filenames omit Day.
     if source_name == "simulator":
@@ -103,6 +121,7 @@ def _resolve_records(
         matched = record.copy()
         matched["PID"] = str(matched["PID"]).strip().upper()
         matched["Day"] = day
+        matched.pop("_Match_Fatigue_Condition", None)
         resolved.append(matched)
     validate_unique_auxiliary(resolved, source_name)
     return resolved

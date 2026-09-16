@@ -29,6 +29,23 @@ def day_from_name(path: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def fatigue_condition_from_name(path: Path) -> int | None:
+    """Return 0 for non-fatigue/NF and 1 for fatigue/F filename tokens."""
+    stem = path.stem.lower()
+    non_fatigue = re.search(
+        r"(?:^|[^a-z0-9])(?:nf|non[_\-\s]?fatigue)(?:$|[^a-z0-9])",
+        stem,
+    )
+    if non_fatigue:
+        return 0
+
+    fatigue = re.search(
+        r"(?:^|[^a-z0-9])(?:f|fatigue)(?:$|[^a-z0-9])",
+        stem,
+    )
+    return 1 if fatigue else None
+
+
 def _safe_extract(archive: zipfile.ZipFile, destination: Path) -> None:
     destination = destination.resolve()
     for member in archive.infolist():

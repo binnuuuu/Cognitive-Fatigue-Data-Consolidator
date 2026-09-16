@@ -77,6 +77,10 @@ class ConsolidatorTests(unittest.TestCase):
                 root / "Post_Survey" / "Post_Survey.csv",
                 [["ignored", "PT3", "1", "0", "2", "1", "42"]],
             )
+            (root / "Pre_Survey.csv").write_text(
+                "PID,Pre_Measure\nPT3,99\n",
+                encoding="utf-8",
+            )
             write_nasa(root / "NASA_TLX" / "PT3_Day1_NASA_TLX.xls")
             write_simulator(root / "sim_Data" / "PT3_Day1_ParticipantData.json")
 
@@ -99,6 +103,7 @@ class ConsolidatorTests(unittest.TestCase):
             self.assertEqual(row["SIM_Action_Accuracy"], 0.5)
             self.assertEqual(row["NASA_Available"], "Yes")
             self.assertEqual(row["Simulator_Available"], "Yes")
+            self.assertNotIn("Pre_Measure", frame.columns)
             self.assertEqual(warnings, [])
 
     def test_dayless_nasa_is_not_guessed_when_two_sessions_exist(self):
@@ -118,6 +123,51 @@ class ConsolidatorTests(unittest.TestCase):
             self.assertEqual(len(frame), 2)
             self.assertTrue((frame["NASA_Available"] == "No").all())
             self.assertTrue(any("multiple sessions" in warning for warning in warnings))
+
+    def test_nasa_f_and_nf_names_match_the_correct_days(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_post_survey(
+                root / "Post_Survey.csv",
+                [
+                    ["ignored", "PT2", "1", "1", "1", "2", "42"],
+                    ["ignored", "PT2", "2", "0", "1", "2", "43"],
+                ],
+            )
+            fatigue_file = root / "NASA_TLX" / "PT2_F.xls"
+            non_fatigue_file = root / "NASA_TLX" / "PT2_NF.xls"
+            write_nasa(fatigue_file)
+            write_nasa(non_fatigue_file)
+            fatigue_file.write_text(
+                fatigue_file.read_text(encoding="utf-8").replace(
+                    "Mental Demand\t60", "Mental Demand\t90"
+                ),
+                encoding="utf-8",
+            )
+
+            frame, warnings = build_consolidated_data(root, DEFAULT_CONFIG)
+
+            day1 = frame.loc[frame["Day"] == 1].iloc[0]
+            day2 = frame.loc[frame["Day"] == 2].iloc[0]
+            self.assertEqual(day1["NASA_Source_File"], "PT2_F.xls")
+            self.assertEqual(day1["NASA_Mental_Demand"], 90)
+            self.assertEqual(day2["NASA_Source_File"], "PT2_NF.xls")
+            self.assertEqual(day2["NASA_Mental_Demand"], 60)
+            self.assertFalse(any("Could not match NASA-TLX" in warning for warning in warnings))
+
+    def test_conflicting_day_and_fatigue_filename_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            write_post_survey(
+                root / "Post_Survey.csv",
+                [["ignored", "PT2", "1", "1", "1", "2", "42"]],
+            )
+            write_nasa(root / "NASA_TLX" / "PT2_Day1_NF_NASA_TLX.xls")
+
+            frame, warnings = build_consolidated_data(root, DEFAULT_CONFIG)
+
+            self.assertEqual(frame.iloc[0]["NASA_Available"], "No")
+            self.assertTrue(any("conflicts" in warning for warning in warnings))
 
 
 if __name__ == "__main__":
