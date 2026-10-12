@@ -6,9 +6,17 @@ from pathlib import Path
 import pandas as pd
 
 from .config import load_config
-from .discovery import discover_study_files, normalize, open_input_tree
+from .discovery import (
+    day_from_name,
+    discover_study_files,
+    fatigue_condition_from_name,
+    mission_from_name,
+    normalize,
+    open_input_tree,
+    participant_from_name,
+)
 from .excel_writer import write_consolidated_workbook
-from .readers import NASA_COLUMNS, read_nasa_tlx, read_post_survey, read_simulator_json
+from .readers import NASA_COLUMNS, read_post_survey, read_simulator_json
 from .validator import (
     ConsolidationError,
     validate_master_sessions,
@@ -133,6 +141,45 @@ def _ensure_columns(frame: pd.DataFrame, columns: list[str]) -> None:
             frame[column] = pd.NA
 
 
+def _copy_number(path: Path) -> int:
+    match = re.search(r"\((\d+)\)$", path.stem)
+    return int(match.group(1)) if match else 1
+
+
+def _prefer_redo_simulator_files(paths: list[Path], warnings: list[str]) -> list[Path]:
+    """Prefer the highest numbered copy when same-session simulator files were redone."""
+    groups: dict[tuple, list[Path]] = {}
+    ungrouped = []
+    for path in paths:
+        participant = participant_from_name(path)
+        condition = fatigue_condition_from_name(path)
+        mission = mission_from_name(path)
+        day = day_from_name(path)
+        if participant is None or all(value is None for value in (condition, mission, day)):
+            ungrouped.append(path)
+            continue
+        key = (participant, condition, day, mission)
+        groups.setdefault(key, []).append(path)
+
+    selected = list(ungrouped)
+    for candidates in groups.values():
+        if len(candidates) == 1:
+            selected.extend(candidates)
+            continue
+        numbered = [path for path in candidates if _copy_number(path) > 1]
+        if numbered:
+            chosen = max(numbered, key=lambda path: (_copy_number(path), path.name.casefold()))
+            ignored = [path.name for path in candidates if path != chosen]
+            warnings.append(
+                f"Selected simulator redo {chosen.name}; ignored earlier copy/copies: "
+                f"{', '.join(ignored)}."
+            )
+            selected.append(chosen)
+        else:
+            selected.extend(candidates)
+    return sorted(selected)
+
+
 def _merge_records(master: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
     if not records:
         return master
@@ -165,6 +212,48 @@ def _reorder_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return frame[first + middle + final]
 
 
+def _build_long_format(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Return one row per participant and fatigue condition, with blank rows for missing conditions."""
+    condition_values = pd.to_numeric(frame["Fatigue Condition"], errors="coerce")
+    configured_labels = config.get("condition_labels", {}).get(
+        "Fatigue Condition", {"0": "Non-fatigue", "1": "Fatigue"}
+    )
+    label_map = {
+        str(key): value
+        for key, value in configured_labels.items()
+    }
+    rows = []
+
+    for participant in frame["PID"].drop_duplicates():
+        for condition in (1, 0):  # F row, then NF row
+            matches = frame.loc[
+                frame["PID"].eq(participant) & condition_values.eq(condition)
+            ]
+            if len(matches) > 1:
+                raise ConsolidationError(
+                    f"Cannot create one F/NF row per participant: {participant} has "
+                    f"multiple sessions for condition {condition}."
+                )
+            if len(matches) == 1:
+                rows.append(matches.iloc[0].to_dict())
+                continue
+
+            missing = {column: pd.NA for column in frame.columns}
+            missing["PID"] = participant
+            missing["Fatigue Condition"] = condition
+            if "Fatigue Condition Label" in missing:
+                missing["Fatigue Condition Label"] = label_map.get(str(condition))
+            if "NASA_Available" in missing:
+                missing["NASA_Available"] = "No"
+            if "Simulator_Available" in missing:
+                missing["Simulator_Available"] = "No"
+            if "Data_Status_Notes" in missing:
+                missing["Data_Status_Notes"] = "No completed session for this condition."
+            rows.append(missing)
+
+    return pd.DataFrame(rows, columns=frame.columns)
+
+
 def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFrame, list[str]]:
     warnings = []
     with open_input_tree(input_path) as root:
@@ -172,25 +261,17 @@ def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFram
         master = read_post_survey(files["post_survey"], config)
         validate_master_sessions(master)
 
-        nasa_records = []
-        for path in files["nasa_tlx"]:
-            try:
-                nasa_records.append(read_nasa_tlx(path))
-            except Exception as exc:
-                warnings.append(f"Failed to read NASA-TLX file {path.name}: {exc}")
-
         simulator_records = []
-        for path in files["simulator"]:
+        simulator_files = _prefer_redo_simulator_files(files["simulator"], warnings)
+        for path in simulator_files:
             try:
                 simulator_records.extend(read_simulator_json(path))
             except Exception as exc:
                 warnings.append(f"Failed to read simulator file {path.name}: {exc}")
 
-        nasa_records = _resolve_records(nasa_records, master, "NASA-TLX", warnings)
         simulator_records = _resolve_records(simulator_records, master, "simulator", warnings)
 
-        output = _merge_records(master, nasa_records)
-        output = _merge_records(output, simulator_records)
+        output = _merge_records(master, simulator_records)
 
     _ensure_columns(output, ["NASA_Source_File", *NASA_COLUMNS.values(), "SIM_Source_File"])
     output["NASA_Available"] = output["NASA_Source_File"].notna().map({True: "Yes", False: "No"})
@@ -219,10 +300,13 @@ def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFram
 
 def consolidate(input_path: Path, output_path: Path, config: dict):
     data, warnings = build_consolidated_data(input_path, config)
+    long_data = _build_long_format(data, config)
     written = write_consolidated_workbook(
         output_path,
         data,
         config.get("worksheet_name", "Consolidated_Data"),
+        long_data,
+        config.get("long_worksheet_name", "Long_Format"),
     )
     return written, data, warnings
 
@@ -243,7 +327,7 @@ def main() -> None:
 
     try:
         written, data, warnings = consolidate(input_path, output_path, config)
-    except (ConsolidationError, FileNotFoundError, ValueError) as exc:
+    except (ConsolidationError, FileNotFoundError, PermissionError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
     for warning in warnings:

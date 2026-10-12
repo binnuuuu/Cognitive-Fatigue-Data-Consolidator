@@ -58,10 +58,24 @@ def _style_worksheet(worksheet, columns: list[str]) -> None:
         worksheet.column_dimensions[get_column_letter(column_index)].width = width
 
 
+def _visually_group_repeated_pids(worksheet, data: pd.DataFrame) -> None:
+    """Hide repeated PID text in adjacent long-format rows while retaining cell values."""
+    if "PID" not in data.columns:
+        return
+
+    pid_column = data.columns.get_loc("PID") + 1
+    for row_index in range(1, len(data)):
+        if data.iloc[row_index]["PID"] == data.iloc[row_index - 1]["PID"]:
+            cell = worksheet.cell(row=row_index + 2, column=pid_column)
+            cell.font = Font(name="Arial", size=10, color="FFFFFF")
+
+
 def write_consolidated_workbook(
     output_path: Path,
     data: pd.DataFrame,
     worksheet_name: str = "Consolidated_Data",
+    long_data: pd.DataFrame | None = None,
+    long_worksheet_name: str = "Long_Format",
 ) -> Path:
     """Write one workbook atomically so a failed run preserves the prior output."""
     output_path = output_path.expanduser().resolve()
@@ -77,14 +91,29 @@ def write_consolidated_workbook(
 
     try:
         with pd.ExcelWriter(temporary_path, engine="openpyxl") as writer:
-            data.to_excel(writer, sheet_name=worksheet_name[:31], index=False)
+            wide_sheet_name = worksheet_name[:31]
+            data.to_excel(writer, sheet_name=wide_sheet_name, index=False)
             workbook = writer.book
-            worksheet = writer.sheets[worksheet_name[:31]]
+            worksheet = writer.sheets[wide_sheet_name]
             _style_worksheet(worksheet, list(data.columns))
+            if long_data is not None:
+                long_sheet_name = long_worksheet_name[:31]
+                if long_sheet_name.casefold() == wide_sheet_name.casefold():
+                    raise ValueError("Wide and long worksheet names must be different.")
+                long_data.to_excel(writer, sheet_name=long_sheet_name, index=False)
+                long_worksheet = writer.sheets[long_sheet_name]
+                _style_worksheet(long_worksheet, list(long_data.columns))
+                _visually_group_repeated_pids(long_worksheet, long_data)
             workbook.properties.title = "Cognitive Fatigue Study Consolidated Data"
-            workbook.properties.subject = "One row per participant study session"
+            workbook.properties.subject = "Wide and long participant study data"
             workbook.properties.creator = "Cognitive Fatigue Data Consolidator"
-        os.replace(temporary_path, output_path)
+        try:
+            os.replace(temporary_path, output_path)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Cannot replace output workbook '{output_path}'. "
+                "Close it in Excel or any other application, then try again."
+            ) from exc
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
