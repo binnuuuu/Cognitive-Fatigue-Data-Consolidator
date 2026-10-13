@@ -8,7 +8,10 @@ import pandas as pd
 from .discovery import (
     day_from_name,
     fatigue_condition_from_name,
+    mission_from_name,
+    normalize_participant_id,
     participant_from_name,
+    normalize,
 )
 
 
@@ -53,7 +56,7 @@ def read_post_survey(path: Path, config: dict) -> pd.DataFrame:
     pid_position = frame.columns.get_loc("PID")
     frame = frame.iloc[:, pid_position:].copy()
     frame.columns = [str(column).strip() for column in frame.columns]
-    frame["PID"] = frame["PID"].astype(str).str.strip().str.upper()
+    frame["PID"] = frame["PID"].map(normalize_participant_id)
     frame = frame[frame["PID"].ne("")].reset_index(drop=True)
 
     drop_columns = config.get("post_survey_drop_columns", ["Spacer", "Spacer_2"])
@@ -69,6 +72,25 @@ def read_post_survey(path: Path, config: dict) -> pd.DataFrame:
             if str(value).strip() else pd.NA
         )
         frame.insert(frame.columns.get_loc(column) + 1, f"{column} Label", labels)
+
+    nasa_survey_columns = {
+        "NASA_TLX_1": "NASA_Mental_Demand",
+        "NASA_TLX_2": "NASA_Physical_Demand",
+        "NASA_TLX_3": "NASA_Temporal_Demand",
+        "NASA_TLX_4": "NASA_Performance",
+        "NASA_TLX_5": "NASA_Effort",
+        "NASA_TLX_6": "NASA_Frustration",
+    }
+    nasa_source_columns = [column for column in nasa_survey_columns if column in frame]
+    for source_column, output_column in nasa_survey_columns.items():
+        if source_column in frame:
+            frame[output_column] = pd.to_numeric(
+                frame[source_column].astype("string").str.strip().replace("", pd.NA),
+                errors="coerce",
+            )
+    frame = frame.drop(columns=nasa_source_columns, errors="ignore")
+    if nasa_source_columns:
+        frame["NASA_Source_File"] = path.name
 
     frame["Post_Source_File"] = path.name
     text_columns = {
@@ -162,19 +184,29 @@ def read_simulator_json(path: Path) -> list[dict]:
     for session in sessions:
         if not isinstance(session, dict):
             raise ValueError(f"Unexpected simulator record in: {path.name}")
-        participant = str(session.get("PID") or participant_from_name(path) or "").strip().upper()
+        participant = normalize_participant_id(
+            session.get("PID") or participant_from_name(path) or ""
+        )
         if not participant:
             raise ValueError(f"Cannot identify participant in simulator file: {path.name}")
 
         run_data = session.get("UserRunData") or {}
+        filename_condition = fatigue_condition_from_name(path)
+        display_condition = normalize(str(session.get("FatigueDisplay") or ""))
+        if filename_condition is None:
+            if display_condition in {"nf", "nonfatigue"}:
+                filename_condition = 0
+            elif display_condition in {"f", "fatigue"}:
+                filename_condition = 1
         record = {
             "PID": participant,
             "Day": _number(session.get("Day")) or day_from_name(path),
+            "_Match_Fatigue_Condition": filename_condition,
             "SIM_Source_File": path.name,
             "SIM_Date": session.get("Date"),
             "SIM_StartTime": session.get("StartTime"),
             "SIM_EndTime": session.get("EndTime"),
-            "SIM_MissionNum": _number(run_data.get("MissionNum")),
+            "SIM_MissionNum": _number(run_data.get("MissionNum")) or mission_from_name(path),
             "SIM_Run_StartTime": run_data.get("StartTime"),
             "SIM_Run_EndTime": run_data.get("EndTime"),
             "SIM_TimeToComplete": _number(run_data.get("TimeToComplete")),

@@ -2,7 +2,8 @@
 input_path: incoming_data
 output_file: output/consolidated_study_data.xlsx
 log_directory: logs
-worksheet_name: Consolidated_Data
+worksheet_name: Wide_Format
+long_worksheet_name: Long_Format
 
 # Qualtrics administrative columns A-Q are removed automatically by keeping
 # columns from PID onward. These procedural fields are also removed.

@@ -7,7 +7,9 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-def _header_fill(column_name: str) -> str:
+def _header_fill(column_name: str, highlight_fatigue: bool = False) -> str:
+    if highlight_fatigue and column_name.endswith("_F"):
+        return "E2F0D9"
     if column_name.startswith("NASA_"):
         return "548235"
     if column_name.startswith("SIM_"):
@@ -17,15 +19,29 @@ def _header_fill(column_name: str) -> str:
     return "1F4E78"
 
 
-def _style_worksheet(worksheet, columns: list[str]) -> None:
+def _style_worksheet(
+    worksheet,
+    columns: list[str],
+    highlight_fatigue_headers: bool = False,
+) -> None:
     worksheet.freeze_panes = "C2"
     worksheet.auto_filter.ref = worksheet.dimensions
     worksheet.sheet_view.showGridLines = False
     worksheet.row_dimensions[1].height = 42
 
     for index, cell in enumerate(worksheet[1], start=1):
-        cell.font = Font(name="Arial", size=10, bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor=_header_fill(columns[index - 1]))
+        column_name = columns[index - 1]
+        is_fatigue_header = highlight_fatigue_headers and column_name.endswith("_F")
+        cell.font = Font(
+            name="Arial",
+            size=10,
+            bold=True,
+            color="385D3A" if is_fatigue_header else "FFFFFF",
+        )
+        cell.fill = PatternFill(
+            "solid",
+            fgColor=_header_fill(column_name, highlight_fatigue_headers),
+        )
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     data_border = Border(bottom=Side(style="hair", color="D9E2F3"))
@@ -38,6 +54,7 @@ def _style_worksheet(worksheet, columns: list[str]) -> None:
 
     for column_index, column_cells in enumerate(worksheet.columns, start=1):
         column_name = columns[column_index - 1]
+        wrap_column = column_name in wrap_columns or "Source_File" in column_name
         max_length = len(column_name)
         for cell in list(column_cells)[1:101]:
             if cell.value is not None:
@@ -45,7 +62,7 @@ def _style_worksheet(worksheet, columns: list[str]) -> None:
             cell.font = Font(name="Arial", size=10)
             cell.alignment = Alignment(
                 vertical="center",
-                wrap_text=column_name in wrap_columns,
+                wrap_text=wrap_column,
             )
             cell.border = data_border
             if "Accuracy" in column_name and isinstance(cell.value, (int, float)):
@@ -53,7 +70,7 @@ def _style_worksheet(worksheet, columns: list[str]) -> None:
             elif isinstance(cell.value, float):
                 cell.number_format = "0.000"
 
-        maximum_width = 42 if column_name in wrap_columns else 28
+        maximum_width = 42 if wrap_column else 28
         width = min(max(max_length + 2, 12), maximum_width)
         worksheet.column_dimensions[get_column_letter(column_index)].width = width
 
@@ -95,7 +112,11 @@ def write_consolidated_workbook(
             data.to_excel(writer, sheet_name=wide_sheet_name, index=False)
             workbook = writer.book
             worksheet = writer.sheets[wide_sheet_name]
-            _style_worksheet(worksheet, list(data.columns))
+            _style_worksheet(
+                worksheet,
+                list(data.columns),
+                highlight_fatigue_headers=True,
+            )
             if long_data is not None:
                 long_sheet_name = long_worksheet_name[:31]
                 if long_sheet_name.casefold() == wide_sheet_name.casefold():

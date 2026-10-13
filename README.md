@@ -1,6 +1,6 @@
 # Cognitive Fatigue Data Consolidator
 
-Reads Post Survey and simulator data and creates an Excel workbook with `Consolidated_Data` and `Long_Format` worksheets.
+Reads Post Survey and simulator data and creates an Excel workbook with `Wide_Format` and `Long_Format` worksheets.
 
 ## Input ZIP
 
@@ -21,8 +21,9 @@ When there are multiple survey files of the same type, the file with the newest 
 
 ## Output
 
-- `Consolidated_Data`: existing output, one row per survey session, with survey and NASA-TLX ratings plus matched simulator summaries.
-- `Long_Format`: two rows per participant, one Fatigue (`F`) and one Non-fatigue (`NF`), with general measure columns and condition identified in `Fatigue Condition`.
+- `Wide_Format`: one row per participant. Condition-specific fields have adjacent `_NF` and `_F` columns; `Day_NF` and `Day_F` preserve the session days. `Fatigue Condition` is represented by the suffixes and is not a separate column. Participant-level fields remain once.
+- Source filename columns are placed at the end of `Wide_Format`.
+- `Long_Format`: unchanged; one row per participant-condition, with general measure columns and condition identified in `Fatigue Condition`.
 - `NASA_Total_Workload` is blank because pairwise NASA-TLX weights are not included in the input.
 
 ## Download and install (Windows PowerShell)

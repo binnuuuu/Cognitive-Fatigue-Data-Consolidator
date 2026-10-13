@@ -16,7 +16,7 @@ from .discovery import (
     participant_from_name,
 )
 from .excel_writer import write_consolidated_workbook
-from .readers import NASA_COLUMNS, read_post_survey, read_simulator_json
+from .readers import NASA_COLUMNS, read_nasa_tlx, read_post_survey, read_simulator_json
 from .validator import (
     ConsolidationError,
     validate_master_sessions,
@@ -184,7 +184,18 @@ def _merge_records(master: pd.DataFrame, records: list[dict]) -> pd.DataFrame:
     if not records:
         return master
     auxiliary = pd.DataFrame(records)
-    return master.merge(auxiliary, how="left", on=["PID", "Day"], validate="one_to_one")
+    overlapping = (set(master.columns) & set(auxiliary.columns)) - {"PID", "Day"}
+    merged = master.merge(
+        auxiliary,
+        how="left",
+        on=["PID", "Day"],
+        validate="one_to_one",
+        suffixes=("", "__auxiliary"),
+    )
+    for column in overlapping:
+        auxiliary_column = f"{column}__auxiliary"
+        merged[column] = merged[column].combine_first(merged.pop(auxiliary_column))
+    return merged
 
 
 def _reorder_columns(frame: pd.DataFrame) -> pd.DataFrame:
@@ -254,12 +265,116 @@ def _build_long_format(frame: pd.DataFrame, config: dict) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=frame.columns)
 
 
+def _is_participant_level_column(frame: pd.DataFrame, column: str) -> bool:
+    """Identify fields that stay constant for participants with repeated sessions."""
+    if column == "PID":
+        return True
+
+    condition_specific = {
+        "Day",
+        "AI_Decision_Support",
+        "AI_Decision_Support Label",
+        "AI_Action_Support",
+        "AI_Action_Support Label",
+        "NASA_Available",
+        "Simulator_Available",
+        "Data_Status_Notes",
+        "SIM_Source_File",
+    }
+    if column in condition_specific:
+        return False
+    if column.startswith("SIM_") or column.startswith("NASA_"):
+        return column in {"NASA_Source_File"}
+
+    repeated_participants = frame.groupby("PID", sort=False).filter(lambda rows: len(rows) > 1)
+    if repeated_participants.empty:
+        return False
+
+    for _, participant_rows in repeated_participants.groupby("PID", sort=False):
+        values = participant_rows[column].astype("string").fillna("<MISSING>")
+        if values.nunique() > 1:
+            return False
+    return True
+
+
+def _build_wide_format(frame: pd.DataFrame) -> pd.DataFrame:
+    """Pivot session rows into one participant row with adjacent NF/F field pairs."""
+    condition_values = pd.to_numeric(frame["Fatigue Condition"], errors="coerce")
+    supported_conditions = condition_values.isin([0, 1])
+    if not supported_conditions.all():
+        bad = sorted(frame.loc[~supported_conditions, "Fatigue Condition"].astype(str).unique())
+        raise ConsolidationError(
+            "Cannot build Wide_Format: unsupported or missing Fatigue Condition value(s): "
+            + ", ".join(bad)
+        )
+
+    excluded = {"Fatigue Condition", "Fatigue Condition Label"}
+    source_columns = [column for column in frame.columns if column not in excluded and column != "PID"]
+    participant_columns = [
+        column for column in source_columns
+        if _is_participant_level_column(frame, column)
+    ]
+    condition_columns = [column for column in source_columns if column not in participant_columns]
+
+    rows = []
+    for participant in frame["PID"].drop_duplicates():
+        participant_rows = frame.loc[frame["PID"].eq(participant)]
+        condition_rows = {
+            0: participant_rows.loc[condition_values.loc[participant_rows.index].eq(0)],
+            1: participant_rows.loc[condition_values.loc[participant_rows.index].eq(1)],
+        }
+        for condition, matches in condition_rows.items():
+            if len(matches) > 1:
+                label = "NF" if condition == 0 else "F"
+                raise ConsolidationError(
+                    f"Cannot build one Wide_Format row for {participant}: multiple {label} "
+                    "sessions were found. Each participant must have at most one session "
+                    "per fatigue condition."
+                )
+
+        row = {"PID": participant}
+        for column in participant_columns:
+            values = participant_rows[column].dropna()
+            row[column] = values.iloc[0] if not values.empty else pd.NA
+
+        # Keep Day first, then preserve the source column order with each NF/F pair adjacent.
+        ordered_condition_columns = (["Day"] if "Day" in condition_columns else []) + [
+            column for column in condition_columns if column != "Day"
+        ]
+        for column in ordered_condition_columns:
+            for condition, suffix in ((0, "NF"), (1, "F")):
+                matches = condition_rows[condition]
+                if not matches.empty:
+                    value = matches.iloc[0][column]
+                elif column.endswith("Available"):
+                    value = "No"
+                elif column == "Data_Status_Notes":
+                    value = "No completed session for this condition."
+                else:
+                    value = pd.NA
+                row[f"{column}_{suffix}"] = value
+        rows.append(row)
+
+    columns = ["PID", *participant_columns]
+    for column in (["Day"] if "Day" in condition_columns else []) + [
+        name for name in condition_columns if name != "Day"
+    ]:
+        columns.extend([f"{column}_NF", f"{column}_F"])
+    wide = pd.DataFrame(rows, columns=columns)
+    source_file_columns = [column for column in wide.columns if "Source_File" in column]
+    other_columns = [column for column in wide.columns if column not in source_file_columns]
+    return wide[other_columns + source_file_columns]
+
+
 def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFrame, list[str]]:
     warnings = []
     with open_input_tree(input_path) as root:
         files = discover_study_files(root)
         master = read_post_survey(files["post_survey"], config)
         validate_master_sessions(master)
+
+        nasa_records = [read_nasa_tlx(path) for path in files["nasa_tlx"]]
+        nasa_records = _resolve_records(nasa_records, master, "NASA-TLX", warnings)
 
         simulator_records = []
         simulator_files = _prefer_redo_simulator_files(files["simulator"], warnings)
@@ -271,7 +386,8 @@ def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFram
 
         simulator_records = _resolve_records(simulator_records, master, "simulator", warnings)
 
-        output = _merge_records(master, simulator_records)
+        output = _merge_records(master, nasa_records)
+        output = _merge_records(output, simulator_records)
 
     _ensure_columns(output, ["NASA_Source_File", *NASA_COLUMNS.values(), "SIM_Source_File"])
     output["NASA_Available"] = output["NASA_Source_File"].notna().map({True: "Yes", False: "No"})
@@ -300,15 +416,16 @@ def build_consolidated_data(input_path: Path, config: dict) -> tuple[pd.DataFram
 
 def consolidate(input_path: Path, output_path: Path, config: dict):
     data, warnings = build_consolidated_data(input_path, config)
+    wide_data = _build_wide_format(data)
     long_data = _build_long_format(data, config)
     written = write_consolidated_workbook(
         output_path,
-        data,
-        config.get("worksheet_name", "Consolidated_Data"),
+        wide_data,
+        config.get("worksheet_name", "Wide_Format"),
         long_data,
         config.get("long_worksheet_name", "Long_Format"),
     )
-    return written, data, warnings
+    return written, wide_data, warnings
 
 
 def main() -> None:
@@ -332,7 +449,7 @@ def main() -> None:
 
     for warning in warnings:
         logging.warning(warning)
-    logging.info("Created %s with %d participant-session row(s).", written, len(data))
+    logging.info("Created %s with %d participant row(s).", written, len(data))
 
 
 if __name__ == "__main__":

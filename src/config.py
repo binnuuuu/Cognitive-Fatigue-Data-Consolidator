@@ -5,7 +5,8 @@ DEFAULT_CONFIG = {
     "input_path": "incoming_data",
     "output_file": "output/consolidated_study_data.xlsx",
     "log_directory": "logs",
-    "worksheet_name": "Consolidated_Data",
+    "worksheet_name": "Wide_Format",
+    "long_worksheet_name": "Long_Format",
     "post_survey_drop_columns": ["Spacer", "Spacer_2"],
     "condition_labels": {
         "Fatigue Condition": {
